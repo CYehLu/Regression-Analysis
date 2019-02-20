@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
 
 from Regression.distribution import critical_value, find_p_value
 
@@ -38,6 +39,7 @@ class SimpleRegression:
         SST = ((y - ymean)**2).sum()
         SSR = ((y_hat - ymean)**2).sum()
         SSE = SST - SSR
+        self.coefficient_ = np.array([b0, b1])
         self.SS_ = {'SST': SST, 'SSR': SSR, 'SSE': SSE}
         self.MS_ = {'MSR': SSR, 'MSE': SSE/(n-2)}
         self.F_ = (n-2) * (SSR/SSE)     # F = MSR / MSE
@@ -49,7 +51,6 @@ class SimpleRegression:
         # standard residual is as same as in the self.residual_plot()
         h = 1/n + (x-xmean)**2 / ((x-xmean)**2).sum()
         self.standard_residual_ = self.residual_ / (np.sqrt(SSE/(n-2)) * np.sqrt(1-h))
-        self.coefficient_ = np.array([b0, b1])
         
     def predict(self, x):
         """
@@ -148,16 +149,16 @@ class SimpleRegression:
         ------
         a list of two tuple. [(CI of b0), (CI of b1)]
         """
-        x = self.x_
-        xmean = x.mean()
-        n = x.size
+        b0, b1 = self.coefficient_
         t_critical = critical_value('t', alpha=alpha/2, dfs=(n-2))[0]  # [0] convert to scaler
         
-        MSE = self.MS_['MSE']
-        Sb0 = np.sqrt(MSE) * np.sqrt(1/n + xmean**2 / ((x-xmean)**2).sum())
-        Sb1 = np.sqrt(MSE / ((x-xmean)**2).sum())
+        try:
+            Sb0, Sb1 = self.standard_error_
+        except AttributeError:
+            # there's no self.standard_error_: do not run coefficient_t_test yet
+            self.coefficient_t_test(alpha=(alpha, alpha))
+            Sb0, Sb1 = self.standard_error_
         
-        b0, b1 = self.coefficient_
         return [(b0 - t_critical*Sb0, b0 + t_critical*Sb0), 
                 (b1 - t_critical*Sb1, b1 + t_critical*Sb1)]
     
@@ -294,7 +295,9 @@ class SimpleRegression:
         # calculate t statistic
         t0 = (b0 - H0_num[0]) / Sb0
         t1 = (b1 - H0_num[1]) / Sb1
-        self.t_ = (t0, t1)
+        if H0_num == (0, 0):
+            # prevent self.t_ changing with difference coef t-test
+            self.t_ = (t0, t1)
         
         # do hypothesis test
         if method == 'p' or method == 'both':
@@ -341,6 +344,50 @@ class SimpleRegression:
         elif method == 'both':
             return [(p0, p1), (critical0[0], critical1[0])]
         
+    def table(self, kind=('coef', 'anova'), return_df=True):
+        """
+        get regression analysis table
+        
+        Parameter:
+        ---------
+        kind: tuple of strings. 'coef' means coefficient table, 'anova' means ANOVA table
+        return_df: bool. if True, it will return pandas DataFrame, and if False it will print out
+        
+        Return:
+        ------
+        pandas DataFrame (if return_df=True)
+        """
+        if 'coef' in kind:
+            p = self.coefficient_t_test(method='p')
+            dfc = pd.DataFrame(np.array([self.coefficient_, self.standard_error_, self.t_, p]).T, 
+                               index=['Intercept', 'X'], 
+                               columns=['Coefficient', 'Standard Error', 't', 'p-value'])
+        if 'anova' in kind:
+            n = self.x_.size
+            p = self.F_test(method='p')
+
+            data = np.array([[self.SS_['SSR'], 1, self.MS_['MSR'], self.F_, p],
+                             [self.SS_['SSE'], n-2, self.MS_['MSE'], np.nan, np.nan],
+                             [self.SS_['SST'], n-1, np.nan, np.nan, np.nan]])
+            dfa = pd.DataFrame(data, 
+                               columns=['SS', 'DF', 'MS', 'F', 'p-value'], 
+                               index=['Regression', 'Error', 'Total'])
+            dfa.replace(np.nan, '', inplace=True)
+
+        if return_df:
+            if 'coef' in kind and 'anova' not in kind:
+                return dfc
+            elif 'anova' in kind and 'coef' not in kind:
+                return dfa
+            elif 'anova' in kind and 'coef' in kind:
+                return (dfc, dfa)
+        else:
+            if 'coef' in kind:
+                print(dfc)
+                print()
+            if 'anova' in kind:
+                print(dfa)
+        
     def residual_plot(self, xaxis='y_hat', yaxis='normal'):
         """
         plot residual distribution
@@ -380,9 +427,7 @@ class SimpleRegression:
             ydata = residual
             ylabel = 'residual'
         elif yaxis == 'standard':
-            S = np.sqrt((residual**2).sum() / (n-2))
-            h = 1/n + (x-x.mean())**2 / ((x-x.mean())**2).sum()
-            ydata = residual / (S*np.sqrt(1-h))   # standard residual
+            ydata = self.standard_residual_
             ylabel = 'standard residual'
             
         fig = plt.figure()
@@ -419,8 +464,399 @@ class SimpleRegression:
     
 
 class LinearRegression:
-    def __init__(self):
-        pass
+    def __init__(self, intercept=True):
+        self._isintercept = intercept
+    
+    def fit(self, X, y):
+        """
+        fit data to the linear regression model
+        
+        Parameter:
+        ---------
+        X: 2-d ndarray. columns of X are variable(features) and rows of X are observation sample
+           EX:
+             var1 var2 var3
+           [[ 1,   2,   3],   sample1
+            [ 2,   1,   4],   sample2
+            [ 5,   3,   2],   sample3
+            [ 7,   1,   2]]   sample4
+            
+        y: 2-d ndarray. it should be a column vector, and the number of rows is equal to X.shape[0]
+           EX:
+           [[1],    sample1
+            [3],    sample2
+            [5],    sample3
+            [2]]    sample4
+        """
+        # check input data
+        if not isinstance(X, np.ndarray) or not isinstance(y, np.ndarray):
+            raise TypeError("X or y should be numpy ndarray")
+        if X.shape[0] != y.size:
+            raise ValueError("X.shape[0] not equal to y.shape[0]")
+        
+        X = X.copy()
+        n, p = X.shape   # p: X's variables number (without intercept), n: X's sample number
+        self._n, self._p = n, p
+        
+        if self._isintercept:
+            X = self._add_intercept(X)
+        self.X_ = X
+        self.y_ = y
+        
+        # calculate coefficient
+        b = np.linalg.inv(X.T @ X) @ X.T @ y    # @: matrix multiply
+        self.coefficient_ = b
+        
+        # calculate some statistics and set as attributes
+        ymean = y.mean() * np.ones(y.shape)
+        yhat = X @ b
+        SST = ( (y - ymean).T @ (y - ymean) )[0,0]    # [0,0]: convert from array to scaler
+        SSR = ( (yhat - ymean).T @ (yhat - ymean) )[0,0]
+        SSE = ( (y - yhat).T @ (y - yhat) )[0,0]
+        self.SS_ = {'SST': SST, 'SSR': SSR, 'SSE': SSE} 
+        self.MS_ = {'MSR': SSR/p, 'MSE': SSE/(n-p-1)}
+        self.F_ = self.MS_['MSR'] / self.MS_['MSE']
+        self.R2_ = SSR / SST
+        self.R2_adj_ = 1 - ((n-1) / (n-p-1)) * (SSE / SST)
+        self.residual_ = y - yhat
+        
+        sb = self.MS_['MSE'] * np.linalg.inv(X.T @ X)
+        self.coefficient_standard_error_ = np.sqrt(sb.diagonal())[:, np.newaxis]
+        self.t_ = b / self.coefficient_standard_error_
+        
+    def predict(self, x):
+        """
+        predict input x with fitted linear regression model
+        
+        Parameter:
+        ---------
+        x: 2-d array-like. columns mean to variables(features) and rows mean to 
+           observation data which wanted to use to predict
+           EX:
+             var1 var2 var3
+           [[ 1,   2,   3],   sample1
+            [ 2,   1,   4],   sample2
+            [ 5,   3,   2],   sample3
+            [ 7,   1,   2]]   sample4
+        
+        Return:
+        ------
+        predict value, it will be a column vector and shape[0] = X.shape[0]
+        """
+        # if x is not ndarray, convert it to ndarray
+        if not isinstance(x, np.ndarray):
+            x = np.array(x)
+            
+        # check variables number (columns of x) is equal to coefficients number
+        nvar = x.shape[1] + int(self._isintercept)
+        if nvar != self.coefficient_.size:
+            raise ValueError("number of variables not matched."
+                             + f"it should be {self.coefficient_.size - int(self._isintercept)} variables, "
+                             + f"but input is {x.shape[1]}")
+            
+        # add intercept
+        if self._isintercept:
+            x = self._add_intercept(x)
+        
+        return x @ self.coefficient_
+    
+    def confidence_interval(self, x, alpha=0.05):
+        """
+        calculate confidence interval of x
+        
+        Parameter:
+        ---------
+        x: 2-d array-like. columns mean to variables(features) and rows mean to observation data
+           EX:
+             var1 var2 var3
+           [[ 1,   2,   3],   sample1
+            [ 2,   1,   4],   sample2
+            [ 5,   3,   2],   sample3
+            [ 7,   1,   2]]   sample4
+        alpha: float. significance level. defult is 0.05
+        
+        Return:
+        ------
+        2-d array with rows mean to difference coefficients and cols means CI
+        """
+        x = np.array(x)
+        y = self.predict(x)
+        if self._isintercept:
+            x = self._add_intercept(x)
+        
+        df = self._n - self._p - 1
+        t_critical = critical_value('t', alpha/2, dfs=(df))
+        
+        standard_error = np.zeros(y.shape)
+        for i, xrow in enumerate(x):
+            ise = np.sqrt(xrow @ np.linalg.inv(self.X_.T @ self.X_) @ xrow.T * self.MS_['MSE'])
+            standard_error[i,0] = ise
+        
+        return np.hstack((y-t_critical*standard_error, y+t_critical*standard_error))
+    
+    def predict_interval(self, x, alpha=0.05):
+        """
+        calculate predict interval of x
+        
+        Parameter:
+        ---------
+        x: 2-d array-like. columns mean to variables(features) and rows mean to observation data
+           EX:
+             var1 var2 var3
+           [[ 1,   2,   3],   sample1
+            [ 2,   1,   4],   sample2
+            [ 5,   3,   2],   sample3
+            [ 7,   1,   2]]   sample4
+        alpha: float. significance level. defult is 0.05
+        
+        Return:
+        ------
+        2-d array with rows mean to difference coefficients and cols mean to CI
+        """
+        x = np.array(x)
+        y = self.predict(x)
+        if self._isintercept:
+            x = self._add_intercept(x)
+        
+        df = self._n - self._p - 1
+        t_critical = critical_value('t', alpha/2, dfs=(df))
+        
+        standard_error = np.zeros(y.shape)
+        for i, xrow in enumerate(x):
+            ise = np.sqrt(self.MS_['MSE']
+                          + xrow @ np.linalg.inv(self.X_.T @ self.X_) @ xrow.T * self.MS_['MSE'])
+            standard_error[i,0] = ise
+        
+        return np.hstack((y-t_critical*standard_error, y+t_critical*standard_error))
+    
+    def coefficient_CI(self, alpha=0.05):
+        """
+        calculate the individual confidient interval (CI) of the coefficients
+        
+        Parameter:
+        ---------
+        alpha: float. significance level. default is 0.05
+        
+        Return:
+        ------
+        ndarray.
+        rows mean to difference coefficient, and columns mean to coefficients CI
+        """
+        n, p = self._n, self._p
+        
+        t_critical = critical_value('t', alpha/2, dfs=(n-p-1))
+        se = self.coefficient_standard_eror_
+        
+        return np.hstack((self.coefficient_ - t_critical*se, self.coefficient_ + t_critical*se))
+    
+    def coefficient_Bon_ferroni_CI(self, index=None, alpha=0.05):
+        """
+        calculate the Bon ferroni joint confident interval (CI) of the coefficients
+        
+        Parameter:
+        ---------
+        index: list or int.
+               if list, the elements of list is the index of coefficient which wanted to 
+               form the Bon ferroni CI.
+               if int, it will take the first n coefficients to form the Bon ferroni CI.
+               if None (default), it will use all coefficients.
+        alpha: float. significance level. default is 0.05.
+        
+        Return:
+        ------
+        ndarray. 
+        rows mean to difference coefficient, and columns mean to Bon ferroni CI
+        """
+        if isinstance(index, int):
+            use_coef = self.coefficient_[:index]
+            standard_error_b = self.coefficient_standard_eror_[:index]
+            g = index
+        elif isinstance(index, list):
+            use_coef = self.coefficient_[index]
+            standard_error_b = self.coefficient_standard_eror_[index]
+            g = len(index)
+        elif index is None:
+            use_coef = self.coefficient_
+            standard_error_b = self.coefficient_standard_eror_
+            g = self._p + 1
+        else:
+            raise TypeError(f"index should be list or int, not {type(index)}.")
+        
+        B = critical_value('t', alpha/(2*g), dfs=(self._n-self._p-1))
+        
+        return np.hstack((use_coef - B*standard_error_b, use_coef + B*standard_error_b))
+    
+    def F_test(self, method='both', alpha=0.05):
+        """
+        run the F test of this simple regression model.
+        
+        if p-value is small enough, or critical value is small than F statistic,
+        then H0: b0=b1=0 would be rejected, means that this regression model is
+        significantly effective.
+        
+        Parameter:
+        ---------
+        method: str. 'p', 'region' or 'both'. 
+                'p' means to p-value, 'region' means to rejection region, 
+                'both' means that use p-value and rejection region together
+        alpha: float, significance level. defult is 0.05
+        
+        Return:
+        ------
+        for method = 'p':
+        return p-value
+        
+        for method = 'region':
+        return critical value that the H0 would be rejected if F is larger than critical value
+        
+        for method = 'both':
+        return tuple (p-value, critical value)
+        """
+        if method not in ['both', 'p', 'region']:
+            raise ValueError("unavailable method: {}".format(method))
+            
+        n = self._n
+        p = self._p
+        dfs = (p, n-p-1)
+        
+        if method == 'p':
+            # calculate p-value
+            p = find_p_value('F', 'right', self.F_, dfs=dfs)
+            return p
+
+        if method == 'region':
+            # calculate rejection region
+            critical = critical_value('F', alpha, dfs=dfs)
+            return critical[0]    # critical is a ndarray with len=1, use [0] to get scaler
+        
+        if method == 'both':
+            p = find_p_value('F', 'right', self.F_, dfs=dfs)
+            critical = critical_value('F', alpha, dfs=dfs)
+            return (p, critical[0])
+    
+    def coefficient_t_test(self, method='both', H0_nums=None, alpha=None):
+        """
+        run coefficients t-test
+        
+        Parameter:
+        ---------
+        H0_num: array-like, value used in null hypothesis.
+                if None, it will set to be all zeros.
+                EX: if (x,y,z), means that H0: b0=x and H0: b1=y and H0: b2=z.
+        method: str. 'p', 'region' or 'both'. 
+                'p' means to p-value, 'region' means to rejection region, 
+                'both' means that use p-value and rejection region together
+        alpha: array-like, significance level for coefficients. defult is all 0.05
+               it can be ignored if method = 'p'
+        
+        Return:
+        ------
+        for method = 'p':
+        return a array which elements are the corresponding p-value of coeffieients
+        
+        for method = 'region':
+        return a array which elements are the corresponding critical value of coefficients
+        if the t statistics is larger than critical value, the H0 will be rejected
+        
+        for method = 'both':
+        return a 2-d array which first column is the p-value,
+        and the second column is the critical value
+        """
+        n = self._n
+        p = self._p
+        
+        if H0_nums is None:
+            H0_nums = np.zeros((p+1,1))
+        if alpha is None:
+            alpha = 0.05 * np.ones(p+1)
+            
+        # calculate t statistics
+        t = (self.coefficient_ - H0_nums) / self.coefficient_standard_error_
+        
+        if method == 'p' or method == 'both':
+            pvalue = np.zeros((p+1,1))
+            for i, ti in enumerate(t):
+                pvalue[i,0] = find_p_value('t', 'two', ti, dfs=(n-p-1))
+        
+        if method == 'region' or method == 'both':
+            critical = np.zeros((p+1,1))
+            for i, ialpha in enumerate(alpha):
+                critical[i,0] = critical_value('t', ialpha, dfs=(n-p-1))
+                
+        if method == 'p':
+            return pvalue
+        if method == 'region':
+            return critical
+        if method == 'both':
+            return np.hstack((pvalue, critical))
+    
+    def table(self, kind=('coef', 'anova'), return_df=True):
+        """
+        get regression analysis table
+        
+        Parameter:
+        ---------
+        kind: tuple of strings. 'coef' means coefficient table, 'anova' means ANOVA table
+        return_df: bool. if True, it will return pandas DataFrame, and if False it will print out
+        
+        Return:
+        ------
+        pandas DataFrame (if return_df=True)
+        """
+        if 'coef' in kind:
+            coef = self.coefficient_
+            se = self.coefficient_standard_error_
+            t = self.t_
+            pvalue = self.coefficient_t_test(method='p')
+            
+            index = ['Intercept'] + ['X'+str(i) for i in range(1, self._p+1)]
+            columns = ['Coefficient', 'Standard Error', 't', 'p-value']
+            dfc = pd.DataFrame(np.hstack((coef, se, t, pvalue)), index=index, columns=columns)
+
+        if 'anova' in kind:
+            n = self._n
+            p = self._p
+            pvalue = self.F_test(method='p')
+
+            data = np.array([[self.SS_['SSR'], p, self.MS_['MSR'], self.F_, pvalue],
+                             [self.SS_['SSE'], n-p-1, self.MS_['MSE'], np.nan, np.nan],
+                             [self.SS_['SST'], n-1, np.nan, np.nan, np.nan]])
+            dfa = pd.DataFrame(data, 
+                               columns=['SS', 'DF', 'MS', 'F', 'p-value'], 
+                               index=['Regression', 'Error', 'Total'])
+            dfa.replace(np.nan, '', inplace=True)
+            dfa['DF'] = dfa['DF'].astype(int)
+
+        if return_df:
+            if 'coef' in kind and 'anova' not in kind:
+                return dfc
+            elif 'anova' in kind and 'coef' not in kind:
+                return dfa
+            elif 'anova' in kind and 'coef' in kind:
+                return (dfc, dfa)
+        else:
+            if 'coef' in kind:
+                print(dfc)
+                print()
+            if 'anova' in kind:
+                print(dfa)
+    
+    def _add_intercept(self, X):
+        """
+        add intercept at matrix x.
+        EX:
+        >>> x = np.array([[12, 13, 14],
+        ...              [15, 16, 17],
+        ...              [18, 19, 20]])
+        >>> x = _add_intercept(x)
+        >>> x
+        np.array([[1, 12, 13, 14],
+                  [1, 15, 16, 17],
+                  [1, 18, 19, 20]])
+        """
+        nrows = X.shape[0]
+        one = np.ones((nrows, 1))
+        return np.hstack((one, X))
     
     
 class PolynomialRegression:

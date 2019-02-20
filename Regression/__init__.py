@@ -1,1 +1,1 @@
-__all__ = ['distribution', 'OLS']
+__all__ = ['distribution', 'OLS', 'Collinearity', 'Residual']
