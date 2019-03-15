@@ -52,6 +52,10 @@ class SimpleRegression:
         h = 1/n + (x-xmean)**2 / ((x-xmean)**2).sum()
         self.standard_residual_ = self.residual_ / (np.sqrt(SSE/(n-2)) * np.sqrt(1-h))
         
+        # it can not set intercept in the simple regression, but it is need
+        # to set the attribute because of residual analysis
+        self._isintercept = False
+        
     def predict(self, x):
         """
         predict input x with fitted simple regression model
@@ -191,7 +195,8 @@ class SimpleRegression:
         if reg:
             plt.plot(xs, ys, 'black', label='regression')
         if CI:
-            uc, lc = self.confidence_interval(xs, alpha)
+            #uc, lc = self.confidence_interval(xs, alpha)
+            uc, lc = self._confidence_band(xs, alpha)
             plt.plot(xs, uc, 'blue', alpha=0.5, label='confident interval')
             plt.plot(xs, lc, 'blue', alpha=0.5)
         if PI:
@@ -435,6 +440,20 @@ class SimpleRegression:
         plt.xlabel(xlabel)
         plt.ylabel(ylabel)
         return fig
+    
+    def _confidence_band(self, xs, alpha):
+        """
+        calculate Working-Hotelling confidence band.
+        it is used in 'plot' method in order to plot CI.
+        """
+        xmean = self.x_.mean()
+        n = self.x_.size
+        MSE = self.MS_['MSE']
+        
+        ys = self.predict(xs)
+        W = np.sqrt(2 * critical_value('F', alpha, dfs=(2,n-2)))
+        stderr = np.sqrt(MSE) * np.sqrt(1/n + (xs-xmean)**2 / ((self.x_-xmean)**2).sum())
+        return (ys-W*stderr, ys+W*stderr)
         
     def _check_and_get_parameter(self):
         """
@@ -587,10 +606,7 @@ class LinearRegression:
         df = self._n - self._p - 1
         t_critical = critical_value('t', alpha/2, dfs=(df))
         
-        standard_error = np.zeros(y.shape)
-        for i, xrow in enumerate(x):
-            ise = np.sqrt(xrow @ np.linalg.inv(self.X_.T @ self.X_) @ xrow.T * self.MS_['MSE'])
-            standard_error[i,0] = ise
+        standard_error = self._calculate_standard_error(x, kind='except')
         
         return np.hstack((y-t_critical*standard_error, y+t_critical*standard_error))
     
@@ -621,11 +637,7 @@ class LinearRegression:
         df = self._n - self._p - 1
         t_critical = critical_value('t', alpha/2, dfs=(df))
         
-        standard_error = np.zeros(y.shape)
-        for i, xrow in enumerate(x):
-            ise = np.sqrt(self.MS_['MSE']
-                          + xrow @ np.linalg.inv(self.X_.T @ self.X_) @ xrow.T * self.MS_['MSE'])
-            standard_error[i,0] = ise
+        standard_error = self._calculate_standard_error(x, kind='predict')
         
         return np.hstack((y-t_critical*standard_error, y+t_critical*standard_error))
     
@@ -645,7 +657,7 @@ class LinearRegression:
         n, p = self._n, self._p
         
         t_critical = critical_value('t', alpha/2, dfs=(n-p-1))
-        se = self.coefficient_standard_eror_
+        se = self.coefficient_standard_error_
         
         return np.hstack((self.coefficient_ - t_critical*se, self.coefficient_ + t_critical*se))
     
@@ -669,15 +681,15 @@ class LinearRegression:
         """
         if isinstance(index, int):
             use_coef = self.coefficient_[:index]
-            standard_error_b = self.coefficient_standard_eror_[:index]
+            standard_error_b = self.coefficient_standard_error_[:index]
             g = index
         elif isinstance(index, list):
             use_coef = self.coefficient_[index]
-            standard_error_b = self.coefficient_standard_eror_[index]
+            standard_error_b = self.coefficient_standard_error_[index]
             g = len(index)
         elif index is None:
             use_coef = self.coefficient_
-            standard_error_b = self.coefficient_standard_eror_
+            standard_error_b = self.coefficient_standard_error_
             g = self._p + 1
         else:
             raise TypeError(f"index should be list or int, not {type(index)}.")
@@ -771,6 +783,7 @@ class LinearRegression:
             alpha = 0.05 * np.ones(p+1)
             
         # calculate t statistics
+        H0_nums = np.array(H0_nums)
         t = (self.coefficient_ - H0_nums) / self.coefficient_standard_error_
         
         if method == 'p' or method == 'both':
@@ -841,6 +854,99 @@ class LinearRegression:
             if 'anova' in kind:
                 print(dfa)
     
+    def simultaneous_estimation_mean(self, X, method=None, alpha=0.05):
+        """
+        calculate the simultaneous estimation of mean responses base on input data
+        
+        Parameter:
+        ---------
+        X: 2-d array-like. rows mean to difference observation point, 
+           columns mean to variables(feature)
+        method: str of 'wh' or 'bf'
+                'wh' is Working-Hotelling, and 'bf' is Bon ferroni method
+                if method is not given, it will choose the tight one
+        alpha: float, significance level. defult is 0.05
+        
+        Return:
+        ------
+        2-d array which rows mean to observation point and columns mean to lower/upper bound
+        """
+        n = self._n
+        p = self._p
+        y = self.predict(X)
+        X = self._add_intercept(np.array(X))
+
+        # Working-Hotelling
+        W = np.sqrt((p+1) * critical_value('F', alpha, dfs=(p-1, n-p-1)))
+
+        # Bon ferroni
+        g = y.size
+        B = critical_value('t', alpha/(2*g), dfs=(n-p-1))
+
+        standard_error = self._calculate_standard_error(X, kind='except')
+
+        WH_interval = np.hstack((y-W*standard_error, y+W*standard_error))
+        BF_interval = np.hstack((y-B*standard_error, y+B*standard_error))
+
+        if method is None:
+            if W <= B:
+                return WH_interval
+            else:
+                return BF_interval
+        elif method == 'wh':
+            return WH_interval
+        elif method == 'bf':
+            return BF_interval
+        else:
+            raise ValueError("unavailable method: {}".format(method))
+        
+    def simultaneous_estimation_new(self, X, method=None, alpha=0.05):
+        """
+        calculate the simultaneous prediction intervals for new observation base
+        on input data
+        
+        Parameter:
+        ---------
+        X: 2-d array-like. rows mean to difference observation point, 
+           columns mean to variables(feature)
+        method: str of 'wh' or 'bf'
+                'wh' is Working-Hotelling, and 'bf' is Bon ferroni method
+                if method is not given, it will choose the tight one
+        alpha: float, significance level. defult is 0.05
+        
+        Return:
+        ------
+        2-d array which rows mean to observation point and columns mean to lower/upper bound
+        """
+        n = self._n
+        p = self._p
+        y = self.predict(X)
+        X = self._add_intercept(np.array(X))
+        g = y.size
+
+        # Scheffe
+        S = np.sqrt(g * critical_value('F', alpha, dfs=(g, n-p-1)))
+
+        # Bon ferroni
+        B = critical_value('t', alpha/(2*g), dfs=(n-p-1))
+
+        standard_error = self._calculate_standard_error(X, kind='predict')
+
+        SF_interval = np.hstack((y-S*standard_error, y+S*standard_error))
+        BF_interval = np.hstack((y-B*standard_error, y+B*standard_error))
+
+        if method is None:
+            if S <= B:
+                return SF_interval
+            else:
+                return BF_interval
+        elif method == 'sf':
+            return SF_interval
+        elif method == 'bf':
+            return BF_interval
+        else:
+            raise ValueError("unavailable method: {}".format(method))
+            
     def _add_intercept(self, X):
         """
         add intercept at matrix x.
@@ -858,11 +964,171 @@ class LinearRegression:
         one = np.ones((nrows, 1))
         return np.hstack((one, X))
     
+    def _calculate_standard_error(self, X, kind):
+        """
+        calculate standard error of each row of X
+        
+        
+        Parameter:
+        ---------
+        X: 2-d array which rows mean to observation and columns mean to variables
+        kind: str of 'except' or 'predict'. 
+              means except interval and predict interval respectively
+              
+        Return:
+        ------
+        2-d array of standard error which shape = (X rows number, 1)
+        """
+        if kind == 'except':
+            k = 0
+        elif kind == 'predict':
+            k = 1
+        
+        MSE = self.MS_['MSE']
+        standard_error = np.zeros((X.shape[0], 1))
+        for i, xrow in enumerate(X):
+            ise = np.sqrt(MSE * (k + xrow @ np.linalg.inv(self.X_.T @ self.X_) @ xrow.T))
+            standard_error[i,0] = ise
+            
+        return standard_error
     
-class PolynomialRegression:
+    
+class Weighted(LinearRegression):
+    def __init__(self, intercept=True):
+        self._isintercept = intercept
+        
+    def fit(self, X, y, weight=None):
+        """
+        Fit data to weighted linear regression with given weights
+        
+        Parameter:
+        ---------
+        X: 2-d array-like. The rows mean to observation data points and the columns
+           mean to variables (features).
+        y: 2-d array-like. Its shape should be (n*1) where n is the number of samples.
+        weight: 1-d or 2-d array-like. The length should be p where p is the number
+                of variables (equal to X.shape[1]).
+                If None, the weight will be all 1.
+        """
+        X = np.array(X)
+        y = np.array(y)
+        
+        n, p = X.shape
+        self._n = n
+        self._p = p
+        
+        # add intercept
+        if self._isintercept:
+            ones = np.ones((X.shape[0], 1))
+            X = np.hstack((ones, X))
+        
+        if weight is None:
+            W = np.zeros((X.shape[0], X.shape[0]))
+            np.fill_diagonal(W, 1)
+        else:
+            W = np.zeros((X.shape[0], X.shape[0]))
+            np.fill_diagonal(W, weight)
+        
+        # compute coefficient
+        b = np.linalg.inv(X.T @ W @ X) @ X.T @ W @ y
+        self.coefficient_ = b
+        self.weight_ = weight.ravel()
+        self.X_ = X
+        self.y_ = y
+        
+        # calculate some statistics and set as attributes
+        ymean = np.average(y.ravel(), weights=weight.ravel())
+        yhat = X @ b
+        SST = ( (y - ymean).T @ W @ (y - ymean) )[0,0]    # [0,0]: convert from array to scaler
+        SSE = ( (y - yhat).T @ W @ (y - yhat) )[0,0]
+        SSR = SST - SSE
+        self.SS_ = {'SST': SST, 'SSR': SSR, 'SSE': SSE} 
+        self.MS_ = {'MSR': SSR/p, 'MSE': SSE/(n-p-1)}
+        self.F_ = self.MS_['MSR'] / self.MS_['MSE']
+        self.R2_ = SSR / SST
+        self.R2_adj_ = 1 - ((n-1) / (n-p-1)) * (SSE / SST)
+        self.residual_ = y - yhat
+        
+        sb = self.MS_['MSE'] * np.linalg.inv(X.T @ W @ X)
+        self.coefficient_standard_error_ = np.sqrt(sb.diagonal())[:, np.newaxis]
+        self.t_ = b / self.coefficient_standard_error_
+    
+    
+class PolynomialRegression(LinearRegression):
+    def __init__(self, order, intercept=True):
+        self._order = order
+        self._isintercept = intercept
+        
+    def fit(self, x, y):
+        """
+        Fit data to the polynomial regression model.
+        
+        Parameter:
+        ---------
+        x: 1-d array-like. Independent variable.
+        y: 1-d array-like. Dependent variable.
+        """
+        # convert to ndarray and make sure they are 1-d array
+        x = np.array(x).ravel()
+        y = np.array(y).ravel()
+        n = x.size
+        
+        y = y[:,np.newaxis]
+        X = np.zeros((n, self._order))
+        for i in range(1, self._order+1):
+            X[:,i-1] = x ** i
+                
+        super().fit(X, y)
+        
+    
+class RidgeRegression():
     def __init__(self):
-        pass
+        self._isintercept = True
     
+    def fit(self, X, y, c):
+        ones = np.ones((X.shape[0], 1))
+        self.X_ = np.hstack((ones, X))
+        self.y_ = y
+        self.c_ = c
+        n, p = X.shape  # p is the number of variables (no intercept term)
+        
+        # normalize first
+        Xn = (X - X.mean(axis=0)) / (X.std(ddof=1, axis=0) * np.sqrt(n-1))
+        yn = (y - y.mean()) / (y.std(ddof=1) * np.sqrt(n-1))
+        
+        # find corrlation matrix and vector
+        rXX = np.corrcoef(Xn, rowvar=False)
+        rXY = np.zeros((p, 1))
+        for i in range(p):
+            rXY[i] = np.corrcoef(Xn[:,i], yn.ravel())[0,1]
+            
+        # calculate coefficients
+        coeff = np.linalg.inv(rXX + c*np.eye(p)) @ rXY
+        self.beta_coefficient_ = coeff
+        
+        self.coefficient_ = np.zeros((p+1, 1))
+        sy = y.std(ddof=1)
+        sx = X.std(ddof=1, axis=0)[:,np.newaxis]
+        self.coefficient_[1:] = (sy/sx) * coeff
+        self.coefficient_[0] = y.mean() - np.sum(self.coefficient_[1:].ravel() * X.mean(axis=0))
+            
+        # set other attributes
+        ymean = y.mean() * np.ones(y.shape)
+        yhat = self.X_ @ self.coefficient_
+        SST = ( (y - ymean).T @ (y - ymean) )[0,0]    # [0,0]: convert from array to scaler
+        SSR = ( (yhat - ymean).T @ (yhat - ymean) )[0,0]
+        SSE = ( (y - yhat).T @ (y - yhat) )[0,0]
+        self.SS_ = {'SST': SST, 'SSR': SSR, 'SSE': SSE} 
+        self.MS_ = {'MSR': SSR/p, 'MSE': SSE/(n-p-1)}
+        self.F_ = self.MS_['MSR'] / self.MS_['MSE']
+        self.R2_ = SSR / SST
+        self.R2_adj_ = 1 - ((n-1) / (n-p-1)) * (SSE / SST)
+        self.residual_ = y - yhat
+        
+        sb = self.MS_['MSE'] * np.linalg.inv(self.X_.T @ self.X_)
+        self.coefficient_standard_error_ = np.sqrt(sb.diagonal())[:, np.newaxis]
+        self.t_ = self.coefficient_ / self.coefficient_standard_error_
+
 
 class LogicalRegression:
     # OLS?????
