@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 import pandas as pd
 
@@ -779,11 +780,15 @@ class LinearRegression:
         
         if H0_nums is None:
             H0_nums = np.zeros((p+1,1))
+        else:
+            H0_nums = np.array(H0_nums)
+            if H0_nums.ndim == 1:
+                H0_nums = H0_nums[:,np.newaxis]
+                
         if alpha is None:
             alpha = 0.05 * np.ones(p+1)
             
         # calculate t statistics
-        H0_nums = np.array(H0_nums)
         t = (self.coefficient_ - H0_nums) / self.coefficient_standard_error_
         
         if method == 'p' or method == 'both':
@@ -794,14 +799,14 @@ class LinearRegression:
         if method == 'region' or method == 'both':
             critical = np.zeros((p+1,1))
             for i, ialpha in enumerate(alpha):
-                critical[i,0] = critical_value('t', ialpha, dfs=(n-p-1))
+                critical[i,0] = critical_value('t', ialpha/2, dfs=(n-p-1))
                 
         if method == 'p':
             return pvalue
         if method == 'region':
-            return critical
+            return np.hstack((t, critical))
         if method == 'both':
-            return np.hstack((pvalue, critical))
+            return np.hstack((pvalue, t, critical))
     
     def table(self, kind=('coef', 'anova'), return_df=True):
         """
@@ -1130,6 +1135,172 @@ class RidgeRegression():
         self.t_ = self.coefficient_ / self.coefficient_standard_error_
 
 
+class _NonlinearBase:
+    def fit(self, X, y, x0, objfunc):
+        result = minimize(objfunc, x0, args=(X, y))
+        return result.x
+    
+    
+class ExpRegression(_NonlinearBase):
+    def __init__(self):
+        pass
+    
+    def fit(self, X, y):
+        n = X.shape[0]
+        self.X_ = X
+        self.y_ = y
+        
+        # find coef and resid
+        lr = LinearRegression()
+        lr.fit(X, np.log(y))
+        b = lr.coefficient_.ravel()
+        g0 = [np.exp(b[0]), b[1]]
+        coef = super().fit(X.ravel(), y.ravel(), g0, self._objfunc)
+        self.coefficient_ = coef[:,np.newaxis]
+        self.residual_ = y - coef[0] * np.exp(coef[1]*X)
+        
+        # find SS and MS
+        yhat = coef[0] * np.exp(coef[1]*X)
+        SST = np.sum((y - y.mean()) ** 2)
+        SSR = np.sum((yhat - y.mean()) ** 2)
+        SSE = np.sum((y - yhat) ** 2)
+        self.SS_ = {'SST': SST, 'SSR': SSR, 'SSE': SSE}
+        self.MS_ = {'MSR': SSR, 'MSE': SSE/(n-2)}
+        
+        # find standard error
+        f0 = lambda x: np.exp(x*coef[1])
+        f1 = lambda x: x * coef[0] * np.exp(coef[1]*x)
+        D = np.zeros((X.size, 2))
+        D[:,[0]] = np.apply_along_axis(f0, 0, X)
+        D[:,[1]] = np.apply_along_axis(f1, 0, X)
+        coef_covmat = self.MS_['MSE'] * np.linalg.inv(D.T @ D)
+        self.coefficient_standard_error_ = np.sqrt(coef_covmat.diagonal())[:,np.newaxis]
+        
+    def predict(self, x):
+        """
+        Predict input x with fitted exponential regression model.
+        
+        Parameter:
+        ---------
+        x: 1-d or 2-d array-like. If 2-d, its shape should be (n,1).
+        
+        Return:
+        ------
+        predict value, it will be a column vector and shape[0] = X.shape[0]
+        """
+        x = np.array(x)
+        coef = self.coefficient_
+        return coef[0] * np.exp(coef[1]*x)
+    
+    def coefficient_CI(self, alpha=0.05):
+        """
+        Calculate the individual confidient interval (CI) of the coefficients.
+        
+        Parameter:
+        ---------
+        alpha: float, significance level. Default is 0.05
+        
+        Return:
+        ------
+        ndarray.
+        Rows mean to difference coefficient, and columns mean to coefficients CI
+        """
+        n = self.X_.shape[0]
+        coef = self.coefficient_
+        t_critical = critical_value('t', alpha/2, dfs=(n-2))
+        se = self.coefficient_standard_error_
+        return np.hstack((coef - t_critical*se, coef + t_critical*se))
+        
+    def coefficient_Bon_ferroni_CI(self, alpha=0.05):
+        """
+        Calculate the Bon ferroni joint confident interval (CI) of the coefficients.
+        
+        Parameter:
+        ---------
+        alpha: float, significance level. default is 0.05.
+        
+        Return:
+        ------
+        ndarray. 
+        Rows mean to difference coefficient, and columns mean to Bon ferroni CI.
+        """
+        n = self.X_.shape[0]
+        coef = self.coefficient_
+        B = critical_value('t', alpha/4, dfs=(n-2))
+        se = self.coefficient_standard_error_
+        return np.hstack((coef - B*se, coef + B*se))
+    
+    def coefficient_t_test(self, method='both', H0_nums=None, alpha=None):
+        """
+        Run coefficients t-test
+        
+        Parameter:
+        ---------
+        H0_num: array-like, value used in null hypothesis.
+                If None, it will set to be all zeros.
+                EX: if (x,y), means that H0: g0=x and H0: g1=y.
+        method: str. 'p', 'region' or 'both'. 
+                'p' means to p-value, 'region' means to rejection region, 
+                'both' means that use p-value and rejection region together.
+        alpha: array-like, significance level for coefficients. Defult is all 0.05.
+               It can be ignored if method = 'p'.
+        
+        Return:
+        ------
+        For method = 'p':
+        Return a array which elements are the corresponding p-value of coeffieients.
+        
+        For method = 'region':
+        Return a 2-d array which the first column mean to t-statistics and the second
+        column mean to corresponding critical value. Rows are corresponding coefficients.
+        If the t statistics is larger than critical value, the H0 will be rejected.
+        
+        For method = 'both':
+        Return a 2-d array which first column is the p-value, the second column is
+        t-statistics, and the third column is the critical value.
+        """
+        n = self.X_.shape[0]
+        
+        # set H0_nums and alpha
+        if H0_nums is None:
+            H0_nums = np.array([[0], [0]])
+        else:
+            H0_nums = np.array(H0_nums)
+            if H0_nums.ndim == 1:
+                H0_nums = H0_nums[:,np.newaxis]
+            
+        if alpha is None:
+            alpha = 0.05 * np.ones(2)
+        
+        # find t statistic
+        coef = self.coefficient_
+        coef_stderr = self.coefficient_standard_error_
+        t = (coef - H0_nums) / coef_stderr
+        
+        # find pvalue and critical value
+        if method == 'p' or method == 'both':
+            pvalue = np.zeros((2,1))
+            for i, ti in enumerate(t):
+                pvalue[i,0] = find_p_value('t', 'two', ti, dfs=(n-2))[0]
+        
+        if method == 'region' or method == 'both':
+            critical = np.zeros((2,1))
+            for i, ialpha in enumerate(alpha):
+                critical[i,0] = critical_value('t', ialpha/2, dfs=(n-2))
+                
+        if method == 'p':
+            return pvalue
+        if method == 'region':
+            return critical
+            return np.hstack((t, critical))
+        if method == 'both':
+            return np.hstack((pvalue, t, critical))
+        
+    def _objfunc(self, g, x, y):
+        # g is parameter of exp regression
+        return np.sum((y - g[0] * np.exp(g[1]*x)) ** 2)        
+        
+        
 class LogicalRegression:
     # OLS?????
     pass

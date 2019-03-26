@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.stats import shapiro, kstest
+from scipy.optimize import fmin
 import matplotlib.pyplot as plt
 
 from .OLS import LinearRegression
@@ -10,9 +11,9 @@ from .test_method import _Brown_Forsythe, _Breusch_Pagan
 class ResidualAnalysis:
     def __init__(self, regobj):
         # check regobj is a regression obj
-        if regobj.__class__.__name__ not in ['LinearRegression' or 'SimpleRegression']:
-            raise TypeError("'regobj' should be 'LinearRegression' or 'SimpleRegression',"
-                            + f"not '{regobj.__class__.__name__}'")
+        allowed_list = ['LinearRegression', 'SimpleRegression', 'ExpRegression']
+        if regobj.__class__.__name__ not in allowed_list:
+            raise TypeError(f"'regobj' can not be '{regobj.__class__.__name__}'")
         else:
             self.regobj = regobj
             
@@ -227,9 +228,131 @@ class ResidualAnalysis:
             W, pvalue = shapiro(self.residual_)
             return pvalue, W
     
-    def autocorrelation_test(self):
-        pass
+    def autocorrelation_test(self, residual=None):
+        """
+        Test whether the residual are autocorrelated by Durbin-Watson test.
+        H0: no autocorrelation
+        Ha: positive autocorrelation
+        
+        If DW is large enough (larger than d_U), then there is no autocorrelation.
+        But it DW < d_L, the autocorrelation is exist.
+        
+        DW test is to check if there is 'positive' autocorrelation.
+        If want to test 'negative' autocorrelation, the test statistic is 4 - DW,
+        then compare 4-DW to d_L and d_U, reject H0 if 4-DW < d_L.
+        
+        Critical value (d_L, d_U) table:
+        http://www.real-statistics.com/statistics-tables/durbin-watson-table/
+        
+        Parameter:
+        ---------
+        residual: array-like. Default is None, means that it will use self.residual_
+                  to calculate dw statistic.
+        
+        Return:
+        ------
+        DW statistic: float
+        """
+        if residual is None:
+            e = self.residual_
+        else:
+            e = residual
+        return np.sum((e[1:]-e[:-1]) ** 2) / np.sum(e**2)
     
+    def Cochrane_Orcutt(self, itermax=5):
+        """
+        Using Cochrane Orcutt procedure to estimate the autocorrelation parameter.
+        It should check the regression of Y_t-r*Y_(t-1) to X_t-r*X_(t-1) is no
+        autocorrelation by Durbin-Waston test.
+       
+        Parameter:
+        ---------
+        itermax: int, the maximum number of iteration. Default is 5.
+        
+        Return:
+        ------
+        Tuple (result, models).
+        Result is a 2-d array which shape = (itermax, 2).
+        The rows mean that the information of every iteration.
+        The first column is the estimate r value and the second one is the 
+        corresponding Durbin-Waston statistic at this iteration.
+        Models is the linear regression modesl of each iteration.
+        """
+        resid = self.residual_
+        X = self.regobj.X_[:,self.regobj._isintercept:]
+        y = self.regobj.y_
+        
+        estimate_r = lambda resid: np.sum(resid[1:]*resid[:-1]) / np.sum(resid[:-1]**2)
+        r = estimate_r(resid)
+        
+        models = []
+        result = np.zeros((itermax, 2))
+        result[0,0] = r
+        result[0,1] = self.autocorrelation_test()
+        
+        for i in range(itermax):
+            X = X[1:,:] - r * X[:-1,:]
+            y = y[1:] - r * y[:-1]
+            lr = LinearRegression()
+            lr.fit(X, y)
+            models.append(lr)
+            resid = lr.residual_
+            
+            result[i,0] = r
+            result[i,1] = self.autocorrelation_test(resid)
+            
+            resid = lr.residual_
+            r = estimate_r(resid)
+            
+        return result, models
+    
+    def Hildreth_Lu(self, rs=None):
+        """
+        Using Hildreth-Lu procedure to estimate the autocorrelation parameter (r).
+        This procedure is to find the best r which can make the regression SSE lowest.
+        It should check the regression of Y_t-r*Y_(t-1) to X_t-r*X_(t-1) is no
+        autocorrelation by Durbin-Waston test.
+        
+        Parameter:
+        ---------
+        rs: array-like. 
+            If None, it will find the best r which can make SSE lowest.
+            If rs is given, it will find the best r in the rs.
+            Default is None.
+            
+        Return:
+        ------
+        tuple (r, dw), where r is the autocorrelation parameter and dw is the
+        corresponding Durbin-Waston statistic.
+        """
+        X = self.regobj.X_[:,self.regobj._isintercept:]
+        y = self.regobj.y_
+        
+        if rs is None:
+            r = fmin(self._get_transform_SSE, 0.5, args=(X, y), disp=False)[0]
+        else:
+            SSEs = [self._get_transform_SSE(r, X, y) for r in rs]
+            r = rs[np.argmin(SSEs)]
+            
+        X = X[1:,:] - r * X[:-1,:]
+        y = y[1:] - r * y[:-1]
+        lr = LinearRegression()
+        lr.fit(X, y)
+        resid = lr.residual_
+        dw = self.autocorrelation_test(resid)
+        return (r, dw)
+            
+    def _get_transform_SSE(self, r, X, y):
+        """
+        This is used in Hildreth in order to find the best r which
+        can make the SSE lowest
+        """
+        X = X[1:,:] - r * X[:-1,:]
+        y = y[1:] - r * y[:-1]
+        lr = LinearRegression()
+        lr.fit(X, y)
+        return lr.SS_['SSE']
+        
 
 class Diagnosis:
     def __init__(self, regobj):
