@@ -8,6 +8,57 @@ from .OLS import LinearRegression
 from .distribution import critical_value, find_p_value
 
 
+def test_reduce_model(X, y, reduce_idx, alpha=0.05, isintercept=True):
+    """
+    Test if the reduce model can be accept.
+    Reduce model is the model which is as same as full model except some 
+    coefficients are zero.
+    EX: full model -> Y = b0 + b1*X1 + b2*X2 + b3*X4 + error
+        reduce model -> Y = b0 + b1*X1 + error
+        thus H0: b2=b3=0
+             Ha: b2!=0 or b3!=0
+             
+    Parameter:
+    ---------
+    X: 2-d ndarray.
+    y: 2-d ndarray with shape = (n,1).
+    reduce_idx: list, the elements of list is the column index in X which is
+                reduced.
+                It should be noticed that index is start from 0. So if want to
+                test b2=b3=0 (corresponding X column index is 1 and 2), the
+                reduce_idx = [1, 2].
+    alpha: float, significance level. Default is 0.05.
+    isintercept: bool, fit intercept term or not.
+    
+    Return:
+    ------
+    array([p, F, critical]).
+    'p' is the p-value of reduce model. If p is small enough, H0 will be rejected
+    and full model will be accepted.
+    'F' is the F statistic of reduce model. It F is larger than critical value,
+    H0 will be rejected and full model will be accepted.
+    'critical' is the critical value of F statistical.
+    """
+    n, p = X.shape
+    
+    # full model
+    lr = LinearRegression(isintercept)
+    lr.fit(X, y)
+    SSE_F = lr.SS_['SSE']
+    df_F = n - lr.X_.shape[1]
+    
+    # reduce model
+    X_r = np.delete(X, reduce_idx, axis=1)
+    lr.fit(X_r, y)
+    SSE_R = lr.SS_['SSE']
+    df_R = n - lr.X_.shape[1]
+    
+    F = ((SSE_R-SSE_F)/(df_R-df_F)) / (SSE_F/df_F)
+    critical = critical_value('F', alpha, dfs=(len(reduce_idx),df_F))
+    p = find_p_value('F', 'right', F, dfs=(len(reduce_idx),df_F))
+    return np.array([p, F, critical])
+
+
 class Criteria:
     def __init__(self, X, y, isintercept=True):
         self.X_ = X    # this X is the original data matrix, no intercept term
