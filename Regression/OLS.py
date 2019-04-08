@@ -515,13 +515,16 @@ class LinearRegression:
             raise ValueError("X.shape[0] not equal to y.shape[0]")
         
         X = X.copy()
-        n, p = X.shape   # p: X's variables number (without intercept), n: X's sample number
-        self._n, self._p = n, p
         
         if self._isintercept:
             X = self._add_intercept(X)
         self.X_ = X
         self.y_ = y
+        n, p = X.shape
+        self._n = n   # number of data
+        self._p = p   # number of variables (including intercrpt, if there is)
+        self._dfr = p-self._isintercept   # df of SSR
+        self._dfe = n-p                   # df of SSE
         
         # calculate coefficient
         b = np.linalg.inv(X.T @ X) @ X.T @ y    # @: matrix multiply
@@ -534,10 +537,10 @@ class LinearRegression:
         SSR = ( (yhat - ymean).T @ (yhat - ymean) )[0,0]
         SSE = ( (y - yhat).T @ (y - yhat) )[0,0]
         self.SS_ = {'SST': SST, 'SSR': SSR, 'SSE': SSE} 
-        self.MS_ = {'MSR': SSR/p, 'MSE': SSE/(n-p-1)}
+        self.MS_ = {'MSR': SSR/self._dfr, 'MSE': SSE/self._dfe}
         self.F_ = self.MS_['MSR'] / self.MS_['MSE']
         self.R2_ = SSR / SST
-        self.R2_adj_ = 1 - ((n-1) / (n-p-1)) * (SSE / SST)
+        self.R2_adj_ = 1 - ((n-1)/(n-p)) * (SSE / SST)
         self.residual_ = y - yhat
         
         sb = self.MS_['MSE'] * np.linalg.inv(X.T @ X)
@@ -604,7 +607,7 @@ class LinearRegression:
         if self._isintercept:
             x = self._add_intercept(x)
         
-        df = self._n - self._p - 1
+        df = self._n - self._p
         t_critical = critical_value('t', alpha/2, dfs=(df))
         
         standard_error = self._calculate_standard_error(x, kind='except')
@@ -635,7 +638,7 @@ class LinearRegression:
         if self._isintercept:
             x = self._add_intercept(x)
         
-        df = self._n - self._p - 1
+        df = self._n - self._p
         t_critical = critical_value('t', alpha/2, dfs=(df))
         
         standard_error = self._calculate_standard_error(x, kind='predict')
@@ -657,10 +660,11 @@ class LinearRegression:
         """
         n, p = self._n, self._p
         
-        t_critical = critical_value('t', alpha/2, dfs=(n-p-1))
+        coef = self.coefficient_
+        t_critical = critical_value('t', alpha/2, dfs=(n-p))
         se = self.coefficient_standard_error_
         
-        return np.hstack((self.coefficient_ - t_critical*se, self.coefficient_ + t_critical*se))
+        return np.hstack((coef - t_critical*se, coef + t_critical*se))
     
     def coefficient_Bon_ferroni_CI(self, index=None, alpha=0.05):
         """
@@ -691,11 +695,11 @@ class LinearRegression:
         elif index is None:
             use_coef = self.coefficient_
             standard_error_b = self.coefficient_standard_error_
-            g = self._p + 1
+            g = self._p
         else:
             raise TypeError(f"index should be list or int, not {type(index)}.")
         
-        B = critical_value('t', alpha/(2*g), dfs=(self._n-self._p-1))
+        B = critical_value('t', alpha/(2*g), dfs=(self._n-self._p))
         
         return np.hstack((use_coef - B*standard_error_b, use_coef + B*standard_error_b))
     
@@ -728,24 +732,22 @@ class LinearRegression:
         if method not in ['both', 'p', 'region']:
             raise ValueError("unavailable method: {}".format(method))
             
-        n = self._n
-        p = self._p
-        dfs = (p, n-p-1)
+        dfs = (self._dfr, self._dfe)
         
         if method == 'p':
             # calculate p-value
-            p = find_p_value('F', 'right', self.F_, dfs=dfs)
-            return p
+            pvalue = find_p_value('F', 'right', self.F_, dfs=dfs)
+            return pvalue
 
         if method == 'region':
             # calculate rejection region
             critical = critical_value('F', alpha, dfs=dfs)
-            return critical[0]    # critical is a ndarray with len=1, use [0] to get scaler
+            return critical
         
         if method == 'both':
-            p = find_p_value('F', 'right', self.F_, dfs=dfs)
+            pvalue = find_p_value('F', 'right', self.F_, dfs=dfs)
             critical = critical_value('F', alpha, dfs=dfs)
-            return (p, critical[0])
+            return (pvalue, critical)
     
     def coefficient_t_test(self, method='both', H0_nums=None, alpha=None):
         """
@@ -779,27 +781,27 @@ class LinearRegression:
         p = self._p
         
         if H0_nums is None:
-            H0_nums = np.zeros((p+1,1))
+            H0_nums = np.zeros((p,1))
         else:
             H0_nums = np.array(H0_nums)
             if H0_nums.ndim == 1:
                 H0_nums = H0_nums[:,np.newaxis]
                 
         if alpha is None:
-            alpha = 0.05 * np.ones(p+1)
+            alpha = 0.05 * np.ones(p)
             
         # calculate t statistics
         t = (self.coefficient_ - H0_nums) / self.coefficient_standard_error_
         
         if method == 'p' or method == 'both':
-            pvalue = np.zeros((p+1,1))
+            pvalue = np.zeros((p,1))
             for i, ti in enumerate(t):
-                pvalue[i,0] = find_p_value('t', 'two', ti, dfs=(n-p-1))
+                pvalue[i,0] = find_p_value('t', 'two', ti, dfs=(n-p))
         
         if method == 'region' or method == 'both':
-            critical = np.zeros((p+1,1))
+            critical = np.zeros((p,1))
             for i, ialpha in enumerate(alpha):
-                critical[i,0] = critical_value('t', ialpha/2, dfs=(n-p-1))
+                critical[i,0] = critical_value('t', ialpha/2, dfs=(n-p))
                 
         if method == 'p':
             return pvalue
@@ -827,7 +829,10 @@ class LinearRegression:
             t = self.t_
             pvalue = self.coefficient_t_test(method='p')
             
-            index = ['Intercept'] + ['X'+str(i) for i in range(1, self._p+1)]
+            if self._isintercept:
+                index = ['Intercept'] + ['X'+str(i) for i in range(1, self._p)]
+            else:
+                index = ['X'+str(i) for i in range(1, self._p+1)]
             columns = ['Coefficient', 'Standard Error', 't', 'p-value']
             dfc = pd.DataFrame(np.hstack((coef, se, t, pvalue)), index=index, columns=columns)
 
@@ -836,9 +841,9 @@ class LinearRegression:
             p = self._p
             pvalue = self.F_test(method='p')
 
-            data = np.array([[self.SS_['SSR'], p, self.MS_['MSR'], self.F_, pvalue],
-                             [self.SS_['SSE'], n-p-1, self.MS_['MSE'], np.nan, np.nan],
-                             [self.SS_['SST'], n-1, np.nan, np.nan, np.nan]])
+            data = np.array([[self.SS_['SSR'], self._dfr, self.MS_['MSR'], self.F_, pvalue],
+                             [self.SS_['SSE'], self._dfe, self.MS_['MSE'], np.nan, np.nan],
+                             [self.SS_['SST'], n-self._isintercept, np.nan, np.nan, np.nan]])
             dfa = pd.DataFrame(data, 
                                columns=['SS', 'DF', 'MS', 'F', 'p-value'], 
                                index=['Regression', 'Error', 'Total'])
@@ -882,11 +887,11 @@ class LinearRegression:
         X = self._add_intercept(np.array(X))
 
         # Working-Hotelling
-        W = np.sqrt((p+1) * critical_value('F', alpha, dfs=(p-1, n-p-1)))
+        W = np.sqrt(p * critical_value('F', alpha, dfs=(p, n-p)))
 
         # Bon ferroni
         g = y.size
-        B = critical_value('t', alpha/(2*g), dfs=(n-p-1))
+        B = critical_value('t', alpha/(2*g), dfs=(n-p))
 
         standard_error = self._calculate_standard_error(X, kind='except')
 
@@ -930,10 +935,10 @@ class LinearRegression:
         g = y.size
 
         # Scheffe
-        S = np.sqrt(g * critical_value('F', alpha, dfs=(g, n-p-1)))
+        S = np.sqrt(g * critical_value('F', alpha, dfs=(g, n-p)))
 
         # Bon ferroni
-        B = critical_value('t', alpha/(2*g), dfs=(n-p-1))
+        B = critical_value('t', alpha/(2*g), dfs=(n-p))
 
         standard_error = self._calculate_standard_error(X, kind='predict')
 
@@ -1018,14 +1023,16 @@ class Weighted(LinearRegression):
         X = np.array(X)
         y = np.array(y)
         
-        n, p = X.shape
-        self._n = n
-        self._p = p
-        
         # add intercept
         if self._isintercept:
             ones = np.ones((X.shape[0], 1))
             X = np.hstack((ones, X))
+            
+        n, p = X.shape
+        self._n = n
+        self._p = p
+        self._dfr = p-self._isintercept
+        self._dfe = n-p
         
         if weight is None:
             W = np.zeros((X.shape[0], X.shape[0]))
@@ -1048,7 +1055,7 @@ class Weighted(LinearRegression):
         SSE = ( (y - yhat).T @ W @ (y - yhat) )[0,0]
         SSR = SST - SSE
         self.SS_ = {'SST': SST, 'SSR': SSR, 'SSE': SSE} 
-        self.MS_ = {'MSR': SSR/p, 'MSE': SSE/(n-p-1)}
+        self.MS_ = {'MSR': SSR/self._dfr, 'MSE': SSE/self._dfe}
         self.F_ = self.MS_['MSR'] / self.MS_['MSE']
         self.R2_ = SSR / SST
         self.R2_adj_ = 1 - ((n-1) / (n-p-1)) * (SSE / SST)
@@ -1095,7 +1102,7 @@ class RidgeRegression():
         self.X_ = np.hstack((ones, X))
         self.y_ = y
         self.c_ = c
-        n, p = X.shape  # p is the number of variables (no intercept term)
+        n, p = self.X_.shape 
         
         # normalize first
         Xn = (X - X.mean(axis=0)) / (X.std(ddof=1, axis=0) * np.sqrt(n-1))
@@ -1103,15 +1110,15 @@ class RidgeRegression():
         
         # find corrlation matrix and vector
         rXX = np.corrcoef(Xn, rowvar=False)
-        rXY = np.zeros((p, 1))
-        for i in range(p):
+        rXY = np.zeros((p-1, 1))
+        for i in range(p-1):
             rXY[i] = np.corrcoef(Xn[:,i], yn.ravel())[0,1]
             
         # calculate coefficients
-        coeff = np.linalg.inv(rXX + c*np.eye(p)) @ rXY
+        coeff = np.linalg.inv(rXX + c*np.eye(p-1)) @ rXY
         self.beta_coefficient_ = coeff
         
-        self.coefficient_ = np.zeros((p+1, 1))
+        self.coefficient_ = np.zeros((p, 1))
         sy = y.std(ddof=1)
         sx = X.std(ddof=1, axis=0)[:,np.newaxis]
         self.coefficient_[1:] = (sy/sx) * coeff
@@ -1124,7 +1131,7 @@ class RidgeRegression():
         SSR = ( (yhat - ymean).T @ (yhat - ymean) )[0,0]
         SSE = ( (y - yhat).T @ (y - yhat) )[0,0]
         self.SS_ = {'SST': SST, 'SSR': SSR, 'SSE': SSE} 
-        self.MS_ = {'MSR': SSR/p, 'MSE': SSE/(n-p-1)}
+        self.MS_ = {'MSR': SSR/(p-1), 'MSE': SSE/(n-p)}
         self.F_ = self.MS_['MSR'] / self.MS_['MSE']
         self.R2_ = SSR / SST
         self.R2_adj_ = 1 - ((n-1) / (n-p-1)) * (SSE / SST)

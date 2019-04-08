@@ -28,6 +28,7 @@ class ResidualAnalysis:
         H = X @ np.linalg.inv(X.T @ X) @ X.T
         hii = H.diagonal()
         MSE = self.regobj.MS_['MSE']
+        self.leverage_ = hii
         self.studentized_residual_ = residual / np.sqrt(MSE * (1-hii))
         self.semistudentized_residual_ = residual / np.sqrt(MSE)
         self.deleted_residual_ = residual / (1 - hii)
